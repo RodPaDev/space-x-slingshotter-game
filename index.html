@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SpaceX Slingshot Game</title>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            background-image: url('/assets/bg.png'); 
+            background-repeat: repeat;
+            background-size: auto;
+        }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Load ship image
+        let shipImg = new Image();
+        shipImg.src = '/assets/starship.png';
+
+        // Game objects
+        let ship = { x: 0, y: 0, vx: 0, vy: 0, size: 10, angle: 0 };
+
+        let planets = [];
+        let lastPlanetX = 300;
+
+        let orbitingPlanet = null;
+        let orbitalRadius = 0;
+        let orbitalAngle = 0;
+        let orbitalAngularSpeed = 0;
+        let orbitalSpeed = 8; // constant orbital tangential speed
+
+        let isHolding = false;
+        let touchId = null;
+
+        let cameraX = 0;
+        let cameraY = 0;
+
+        let score = 0;
+        let distanceTraveled = 0;
+
+        let particles = [];
+
+        let gravForceConstant = 20; // Tune gravity
+
+        let maxFuel = 100;
+        let fuel = maxFuel;
+
+        let gameState = 'menu';
+
+        let shipExploded = false;
+
+        let shipWidth = 30;
+        let shipHeight = 59;
+
+        let isPlayingBackground = false;
+
+        // Muted color palette for planets
+        const planetColors = [
+            '#A8A8A8', '#C58C8C', '#7FB8A6', '#A89BB8', '#B7997B', '#8DA4B7'
+        ];
+
+        // Sound functions
+        function playBeep(freq, duration) {
+          const oscillator = audioCtx.createOscillator();
+          const gainNode = audioCtx.createGain();
+          oscillator.type = 'square';
+          oscillator.frequency.value = freq;
+          oscillator.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          gainNode.gain.value = 0.05; // 50% volume
+          oscillator.start();
+          setTimeout(() => {
+            oscillator.stop();
+          }, duration * 1000);
+        }
+
+        function playExplosion() {
+          const bufferSize = audioCtx.sampleRate * 0.2;
+          const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+          const data = buffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+          }
+          const noise = audioCtx.createBufferSource();
+          noise.buffer = buffer;
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = 0.05; // 50% volume
+          noise.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          noise.start();
+        }
+
+        // Chiptune background
+        const getFrequency = (note = 1) => {
+            switch (note) {
+                case 4:
+                    return 440;
+                case 6:
+                    return 392;
+                case 8:
+                    return 349;
+                case 9:
+                    return 330;
+                case 11:
+                    return 294;
+                case 13:
+                    return 262;
+                case 14:
+                    return 247;
+                case 15:
+                    return 233;
+                case 16:
+                    return 220;
+                case 18:
+                    return 196;
+                case 21:
+                    return 165;
+                default:
+                    return 0;
+            }
+        }
+        const patternA = [
+            4, 6, 8, 9, 11, 13, 11, 9, 8, 6, 4, 0, 4, 8, 13, 16, 13, 8, 4, 0
+        ];
+        const patternB = [
+            9, 11, 13, 14, 16, 18, 16, 14, 13, 11, 9, 0, 9, 13, 18, 21, 18, 13, 9, 0
+        ];
+        const sleep = (duration = 200) => new Promise((resolve) => {
+            setTimeout(resolve, duration);
+        });
+        async function playChiptune() {
+            if (isPlayingBackground) return;
+            isPlayingBackground = true;
+            while (isPlayingBackground) {
+                for (let note of patternA) {
+                    if (!isPlayingBackground) break;
+                    await sleep(100); // Adjust speed
+                    const freq = getFrequency(note);
+                    if (freq > 0) {
+                        playBeep(freq, 0.1);
+                    }
+                }
+                for (let note of patternB) {
+                    if (!isPlayingBackground) break;
+                    await sleep(100); // Adjust speed
+                    const freq = getFrequency(note);
+                    if (freq > 0) {
+                        playBeep(freq, 0.1);
+                    }
+                }
+            }
+        }
+
+        // Game over chiptune
+        async function playGameOverChiptune() {
+            const goNotes = [800, 600, 400, 200];
+            for (let freq of goNotes) {
+                playBeep(freq, 0.2);
+                await sleep(200);
+            }
+        }
+
+        // Reset game
+        function resetGame() {
+            planets = [];
+            lastPlanetX = 300;
+            particles = [];
+            score = 0;
+            distanceTraveled = 0;
+            fuel = maxFuel;
+            orbitingPlanet = null;
+            shipExploded = false;
+
+            // Create initial planet
+            let initialPlanet = { x: 300, y: canvas.height / 2, radius: 50, gravRadius: 150 };
+            addCraters(initialPlanet);
+            initialPlanet.color = planetColors[Math.floor(Math.random() * planetColors.length)];
+            planets.push(initialPlanet);
+            orbitingPlanet = initialPlanet;
+            orbitalRadius = initialPlanet.gravRadius * 0.8;
+            orbitalAngle = 0; // Start at right side
+            orbitalAngularSpeed = orbitalSpeed / orbitalRadius; // Counterclockwise
+            ship.x = initialPlanet.x + orbitalRadius * Math.cos(orbitalAngle);
+            ship.y = initialPlanet.y + orbitalRadius * Math.sin(orbitalAngle);
+            ship.angle = orbitalAngle + Math.PI / 2;
+            isHolding = true; // Start holding to orbit
+            playChiptune();
+        }
+
+        // Input handlers
+        canvas.addEventListener('mousedown', () => {
+            if (gameState !== 'playing') {
+                resetGame();
+                gameState = 'playing';
+            } else {
+                isHolding = true;
+            }
+        });
+        document.addEventListener('mouseup', () => { 
+            if (gameState === 'playing') {
+                isHolding = false; 
+            }
+        });
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (gameState !== 'playing') {
+                resetGame();
+                gameState = 'playing';
+                touchId = e.changedTouches[0].identifier;
+            } else if (!isHolding) {
+                isHolding = true;
+                touchId = e.changedTouches[0].identifier;
+            }
+        });
+        document.addEventListener('touchend', (e) => {
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === touchId) {
+                    if (gameState === 'playing') {
+                        isHolding = false;
+                    }
+                    touchId = null;
+                }
+            }
+        });
+        document.addEventListener('touchcancel', () => { isHolding = false; touchId = null; });
+
+        // Dist function
+        function dist(x1, y1, x2, y2) {
+            return Math.sqrt((x1 - x2) ** 2 + (y1 - y2)**2);
+        }
+
+        // Add craters to planet
+        function addCraters(planet) {
+            let craters = [];
+            let numCraters = Math.floor(Math.random() * 5) + 3;
+            for (let i = 0; i < numCraters; i++) {
+                let angle = Math.random() * Math.PI * 2;
+                let cDist = Math.random() * planet.radius * 0.8;
+                let craterSize = Math.random() * planet.radius * 0.2 + planet.radius * 0.05;
+                craters.push({angle, cDist, size: craterSize});
+            }
+            planet.craters = craters;
+        }
+
+        // Generate more planets
+        function generateMorePlanets() {
+            planets = planets.filter(p => p.x > ship.x - 1000); // Cull far left
+
+            while (lastPlanetX < ship.x + canvas.width * 1.5) {
+                let px = lastPlanetX + 200 + Math.random() * 300;
+                let py = Math.random() * (canvas.height - 200) + 100;
+                let radius = 20 + Math.random() * 60; // Vary size more
+                let gravRadius = radius * (2 + Math.random() * 1); // Vary grav multiplier 2 to 3
+                let planet = { x: px, y: py, radius, gravRadius };
+                addCraters(planet);
+                planet.color = planetColors[Math.floor(Math.random() * planetColors.length)];
+                planets.push(planet);
+                lastPlanetX = px;
+            }
+        }
+
+        // Add slingshot effects
+        function addSlingshotEffects(pos) {
+            for (let i = 0; i < 20; i++) {
+                particles.push({
+                    x: pos.x,
+                    y: pos.y,
+                    vx: Math.random() * 4 - 2,
+                    vy: Math.random() * 4 - 2,
+                    life: 60 + Math.random() * 40
+                });
+            }
+        }
+
+        // Add explosion effects
+        function addExplosionEffects(pos) {
+            for (let i = 0; i < 50; i++) {
+                particles.push({
+                    x: pos.x,
+                    y: pos.y,
+                    vx: Math.random() * 10 - 5,
+                    vy: Math.random() * 10 - 5,
+                    life: 60 + Math.random() * 40
+                });
+            }
+        }
+
+        // Add thruster particles
+        function addThrusterParticles() {
+            let rearX = ship.x - Math.cos(ship.angle) * (shipHeight / 2);
+            let rearY = ship.y - Math.sin(ship.angle) * (shipHeight / 2);
+            for (let i = 0; i < 2; i++) { // Add a couple per frame
+                particles.push({
+                    x: rearX + (Math.random() - 0.5) * 5,
+                    y: rearY + (Math.random() - 0.5) * 5,
+                    vx: -Math.cos(ship.angle) * 3 + (Math.random() - 0.5),
+                    vy: -Math.sin(ship.angle) * 3 + (Math.random() - 0.5),
+                    life: 20 + Math.random() * 10
+                });
+            }
+        }
+
+        // Draw menu
+        function drawMenu() {
+            ctx.textAlign = 'center';
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 40px Arial';
+            ctx.fillText('SpaceX Slingshotter!', canvas.width / 2, canvas.height / 2 - 120);
+            ctx.font = '20px Arial';
+            ctx.fillText('Hold to start, letting go will slingshot you!', canvas.width / 2, canvas.height / 2 - 40);
+            ctx.fillText('Hold click/touch to lock into orbit when near a planet.', canvas.width / 2, canvas.height / 2 - 10);
+            ctx.fillText('Refuel while orbiting (careful, close orbits drain fuel)!', canvas.width / 2, canvas.height / 2 + 20);
+            ctx.fillText('The farther you are from orbit, the faster the fuel drains.', canvas.width / 2, canvas.height / 2 + 50);
+            ctx.fillText('Click or touch to start!', canvas.width / 2, canvas.height / 2 + 80);
+        }
+
+        // Draw game over
+        function drawGameOver() {
+            ctx.textAlign = 'center';
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 40px Arial';
+            ctx.fillText('SpaceX Slingshotter!', canvas.width / 2, canvas.height / 2 - 150);
+            ctx.fillText('Game Over!', canvas.width / 2, canvas.height / 2 - 80);
+            ctx.font = '30px Arial';
+            ctx.fillText('Your Score: ' + score, canvas.width / 2, canvas.height / 2 - 20);
+            ctx.font = '20px Arial';
+            ctx.fillText('Click or touch to restart!', canvas.width / 2, canvas.height / 2 + 40);
+        }
+
+        // Game loop
+        function update() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (gameState === 'playing') {
+                generateMorePlanets();
+
+                // Update distance and score
+                distanceTraveled = Math.max(distanceTraveled, ship.x);
+                score = Math.floor(distanceTraveled);
+            }
+
+            // Update camera
+            cameraX = ship.x - canvas.width / 3;
+            cameraY = ship.y - canvas.height / 2;
+
+            // Start drawing with camera
+            ctx.save();
+            ctx.translate(-cameraX, -cameraY);
+
+            // Draw planets
+            for (let planet of planets) {
+                // Grav ring
+                ctx.beginPath();
+                ctx.arc(planet.x, planet.y, planet.gravRadius, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(100, 100, 255, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Planet
+                ctx.beginPath();
+                ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2);
+                ctx.fillStyle = planet.color || '#888';
+                ctx.fill();
+
+                // Draw craters
+                if (planet.craters) {
+                    for (let crater of planet.craters) {
+                        ctx.beginPath();
+                        let cx = planet.x + Math.cos(crater.angle) * crater.cDist;
+                        let cy = planet.y + Math.sin(crater.angle) * crater.cDist;
+                        ctx.arc(cx, cy, crater.size, 0, Math.PI * 2);
+                        ctx.fillStyle = '#666';
+                        ctx.fill();
+                    }
+                }
+
+                // Glow if in field
+                let d = dist(ship.x, ship.y, planet.x, planet.y);
+                if (d < planet.gravRadius) {
+                    ctx.beginPath();
+                    ctx.arc(planet.x, planet.y, planet.gravRadius, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(0, 255, 0, 0.6)';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+            }
+
+            if (gameState === 'playing') {
+                if (orbitingPlanet) {
+                    // Orbiting
+                    if (isHolding) {
+                        orbitalAngle += orbitalAngularSpeed;
+                        ship.x = orbitingPlanet.x + orbitalRadius * Math.cos(orbitalAngle);
+                        ship.y = orbitingPlanet.y + orbitalRadius * Math.sin(orbitalAngle);
+
+                        // Set angle for ship
+                        ship.angle = orbitalAngle + (orbitalAngularSpeed > 0 ? Math.PI / 2 : -Math.PI / 2);
+
+                        // Replenish fuel proportional to closeness (lose more when closer)
+                        let fuelChange = 0.5 - (20 / orbitalRadius);
+                        fuel = Math.min(maxFuel, Math.max(0, fuel + fuelChange));
+
+                        // Trajectory prediction
+                        let predVx = - orbitalAngularSpeed * orbitalRadius * Math.sin(orbitalAngle);
+                        let predVy = orbitalAngularSpeed * orbitalRadius * Math.cos(orbitalAngle);
+                        let predLength = 150;
+                        let norm = Math.sqrt(predVx ** 2 + predVy ** 2);
+                        let scale = predLength / norm;
+
+                        ctx.beginPath();
+                        ctx.moveTo(ship.x, ship.y);
+                        ctx.lineTo(ship.x + predVx * scale, ship.y + predVy * scale);
+                        ctx.strokeStyle = 'yellow';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    } else {
+                        // Launch
+                        ship.vx = - orbitalAngularSpeed * orbitalRadius * Math.sin(orbitalAngle);
+                        ship.vy = orbitalAngularSpeed * orbitalRadius * Math.cos(orbitalAngle);
+                        addSlingshotEffects({x: ship.x, y: ship.y});
+                        orbitingPlanet = null;
+                        playBeep(600, 0.1); // Detach sound
+                    }
+                } else {
+                    // Free flight
+                    let inGrav = false;
+                    let minD = Infinity;
+                    for (let planet of planets) {
+                        let d = dist(ship.x, ship.y, planet.x, planet.y);
+                        if (d < minD) minD = d;
+                        if (d < planet.radius + ship.size / 2) {
+                            // Collision
+                            addExplosionEffects({x: ship.x, y: ship.y});
+                            playExplosion();
+                            shipExploded = true;
+                            isHolding = false;
+                            gameState = 'gameover';
+                            isPlayingBackground = false;
+                            playGameOverChiptune();
+                            break;
+                        }
+
+                        if (d < planet.gravRadius) {
+                            inGrav = true;
+                            // Apply gravity
+                            let dx = planet.x - ship.x;
+                            let dy = planet.y - ship.y;
+                            let distSq = d * d;
+                            let force = gravForceConstant / distSq;
+                            let unitDx = dx / d;
+                            let unitDy = dy / d;
+                            ship.vx += force * unitDx;
+                            ship.vy += force * unitDy;
+
+                            // Lock if holding
+                            if (isHolding && !orbitingPlanet) {
+                                orbitingPlanet = planet;
+                                let rX = ship.x - planet.x;
+                                let rY = ship.y - planet.y;
+                                orbitalRadius = Math.sqrt(rX ** 2 + rY ** 2);
+                                orbitalAngle = Math.atan2(rY, rX);
+                                let cross = rX * ship.vy - rY * ship.vx;
+                                let sign = Math.sign(cross) || 1;
+                                orbitalAngularSpeed = sign * (orbitalSpeed / orbitalRadius);
+                                playBeep(800, 0.1); // Attach sound
+                            }
+                        }
+                    }
+
+                    // Deplete fuel proportional to distance from nearest planet
+                    fuel -= 0.2 * (minD / 150);
+                    if (fuel <= 0) {
+                        addExplosionEffects({x: ship.x, y: ship.y});
+                        playExplosion();
+                        shipExploded = true;
+                        isHolding = false;
+                        gameState = 'gameover';
+                        isPlayingBackground = false;
+                        playGameOverChiptune();
+                    }
+
+                    // Add thruster particles in free flight
+                    addThrusterParticles();
+
+                    // Update position
+                    ship.x += ship.vx;
+                    ship.y += ship.vy;
+
+                    // Failure drift
+                    if (!inGrav && Math.sqrt(ship.vx**2 + ship.vy**2) < 0.1) {
+                        addExplosionEffects({x: ship.x, y: ship.y});
+                        playExplosion();
+                        shipExploded = true;
+                        isHolding = false;
+                        gameState = 'gameover';
+                        isPlayingBackground = false;
+                        playGameOverChiptune();
+                    }
+                }
+            }
+
+            // Draw ship if not exploded and image loaded
+            if (!shipExploded && shipImg.complete) {
+                ctx.save();
+                ctx.translate(ship.x, ship.y);
+                ctx.rotate(ship.angle + Math.PI / 2); // Adjust for image pointing up
+                ctx.drawImage(shipImg, -shipWidth / 2, -shipHeight / 2, shipWidth, shipHeight);
+                ctx.restore();
+            }
+
+            // Particles
+            particles = particles.filter(p => p.life > 0);
+            for (let p of particles) {
+                ctx.fillStyle = `rgba(255, 165, 0, ${p.life / 100})`;
+                ctx.fillRect(p.x, p.y, 3, 3);
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 1;
+            }
+
+            ctx.restore();
+
+            if (gameState === 'playing') {
+                // UI elements
+                ctx.textAlign = 'left';
+                ctx.fillStyle = 'white';
+                ctx.font = '20px Arial';
+                ctx.fillText(`Score: ${score}`, 20, 30);
+                ctx.fillText(`Distance: ${Math.floor(distanceTraveled)}`, 20, 60);
+
+                // Fuel bar
+                ctx.fillStyle = 'red';
+                ctx.fillRect(20, 80, 100 * (fuel / maxFuel), 10);
+                ctx.strokeStyle = 'white';
+                ctx.strokeRect(20, 80, 100, 10);
+            }
+
+            if (gameState !== 'playing') {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            if (gameState === 'menu') {
+                drawMenu();
+            } else if (gameState === 'gameover') {
+                drawGameOver();
+            }
+
+            requestAnimationFrame(update);
+        }
+
+        resetGame();
+        update();
+    </script>
+</body>
+</html>
